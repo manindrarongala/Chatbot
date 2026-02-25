@@ -2,45 +2,89 @@ import streamlit as st
 import os
 from dotenv import load_dotenv
 load_dotenv()
-from groq import Groq
+
 from langchain_groq import ChatGroq
-from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain_ollama import OllamaEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFDirectoryLoader
+from langchain_core.runnables import RunnablePassthrough
 
+# API Key handling
+api_key = os.getenv("GROQ_API_KEY")
+if not api_key:
+    st.error("GROQ_API_KEY is missing. Please add it to your .env file.")
+    st.stop()
+os.environ["GROQ_API_KEY"] = api_key
 
-os.environ["LANGCHAIN_API_KEY"]=os.getenv("LANGCHAIN_API_KEY")
-os.environ["LANGCHAIN_TRACING_V2"]="true"
-os.environ["LANGCHAIN_PROJECT"]="SIMPLE CHATBOT USING GROQ"
+# Initialize LLM
+llm = ChatGroq(api_key=api_key, model="llama-3.1-8b-instant")
 
-prompt=ChatPromptTemplate.from_messages([
-    ("system","you are a helpful assistant.please response based on the user query"),
-    ("user","{question}")
-])
+# Define prompt template
+prompt = ChatPromptTemplate.from_template(
+    """
+    Answer the question based on the context provided.
+    you need to provided the related image or diagrams for the concepts.
+    please given the response accurately and in a concise manner.
+    context:{context}
+    question:{question}
+    """
+)
 
-def generate_response(question,api_key,llm,temperature,max_tokens):
-    Groq(api_key=api_key)
-    llm=ChatGroq(model=llm)
-    output_parser=StrOutputParser()
-    chain=prompt|llm|output_parser
-    answer=chain.invoke({"question":question})
-    return answer
+def create_vector_embeddings():
+    if "vectors" not in st.session_state:
+        st.session_state.embeddings = OllamaEmbeddings(model="gemma:2b")
+        # Loads all PDFs in the "research_paper" directory
+        st.session_state.loader = PyPDFDirectoryLoader("research_paper")
+        st.session_state.docs = st.session_state.loader.load()
+        st.session_state.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        st.session_state.final_documents = st.session_state.text_splitter.split_documents(st.session_state.docs)
+        st.session_state.vectorstore = FAISS.from_documents(st.session_state.final_documents, st.session_state.embeddings)
+        st.session_state.vectors = True
 
+st.title("RAG DOCUMENTS WITH GROQ")
 
-##strealit app
+# User input
+user_input = st.text_input("Ask a question about the research paper")
 
-st.title("SIMPLE CHATBOT")
-st.sidebar.title("Settings")
-api_key=st.sidebar.text_input("enter your api key",type="password")
-llm=st.sidebar.selectbox("Select AI model:",["llama-3.1-8b-instant","openai/gpt-oss-120b","llama-3.3-70b-versatile"])
-temperature=st.sidebar.slider("Temperature",min_value=0.0,max_value=1.0,value=0.7)
-max_tokens=st.sidebar.slider("Max_token",min_value=1,max_value=32768,value=16384)
+if st.button("Vector Embeddings"):
+    with st.spinner("Creating vector embeddings..."):
+        create_vector_embeddings()
+        st.success("Vector store is ready!")
 
-##main interface
-st.write("GO Ahead and Ask Your Question")
-user_input=st.text_input("You:")
+import time
 if user_input:
-    response=generate_response(user_input,api_key,llm,temperature,max_tokens)
-    st.write(response)
-else:
-    st.write("please enter your  question")
+    if "vectorstore" not in st.session_state:
+        st.warning("Please create vector embeddings first.")
+    else:
+        retriever = st.session_state.vectorstore.as_retriever()
+        
+        # LCEL Chain
+        def format_docs(docs):
+            return "\n\n".join(doc.page_content for doc in docs)
+
+        rag_chain = (
+            {"context": retriever | format_docs, "question": RunnablePassthrough()}
+            | prompt
+            | llm
+            | StrOutputParser()
+        )
+        
+        start = time.process_time()
+        response = rag_chain.invoke(user_input)
+        end = time.process_time()
+        
+        # Documents for expander
+        context_docs = retriever.invoke(user_input)
+        
+        st.write(f"Response (Time taken: {end-start:.2f}s):")
+        st.write(response)
+
+        # Streamlit expander
+        with st.expander("Documents similarity search"):
+            for i, doc in enumerate(context_docs):
+                st.write(f"**Chunk {i+1}:**")
+                st.write(doc.page_content)
+                st.write('--------------------')

@@ -4,5 +4,5 @@ ipykernel
 python-dotenv
 langchain_ollama
 langchain_groq
-streamlit
-
+faiss-cpu
+pypdf
